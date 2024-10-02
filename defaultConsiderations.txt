@@ -1,0 +1,13 @@
+Snowflake does provide for default setting for a column but using that setting is still a problem:
+1. When there is a single measure in a table, we agree it doesn't make sense to store that default value in every row. Being a columnar database, the measure column wont take much space if most adjacent rows contain 'default', but the columns for base intersection will take unnecessary space. If 1 of the base intersection is day and if calendar is defined for old dates like year 2000 etc this will take space more than 1000 times the original minimal space required. So we anyway would require the BI or presentation layer (including planning engine) to have this setting that if it doesn't get a value from db then it should show the default value.
+2. The way the default setting works in most databases is that if we provide a null in the insert, it inserts null. It only inserts the 'default' if we dont provide that column's value in the insert statement. So now what if a measure (measure2) is derived from another measure (measure1) and mesure1 itself contains nulls in some rows, do we store those rows as null for measure2 or do we store those rows with measure2's 'default' value? I think we should store as nulls indeed, so we can have a logic for BI layer to that pick the value it is getting from the database, be it 'default', 'some other value' or even 'null' and dont transform null with default, but only include 'default', if it doesn't get any row/result from the database. This might be a little difficult to implement in BI/downstream apps.
+3. In case there are 2 or more measures in the same table (same base intersection) and we have a value (non null, non default) for the 1st set of rows for measureA and values for 2nd set of rows measureB then in the outer joined table containing data for both the measures, we have to make sure that we insert default only when we're getting nulls because of the outer join and not because of the inherent null in any of the measure's value. Requires some special handling in SQL though can be done
+
+Rule: measA[class] = meas1[style]
+And lets say meas1 has a default value set to 1 and default aggregation set to total.
+Then do we apply the coalesce and left join with dim table before aggregation or after aggregation?
+Also if the rule is like this:
+measA[class] = coalesce(meas1[style],1)
+then what would be answer for the above question?
+
+If we always do a left join of meas table with its base intersection while reading (even in scenarios like aggregating), then not sure if skipping to store default values in database helps in performance or worsens it. 

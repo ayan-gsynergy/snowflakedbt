@@ -1,0 +1,59 @@
+Results for dimension updates' impact on Incremental updates for measures:
+1. Can work through if we have simple functions:
+    So it seems only for those RHS measures where both for RHS and LHS we have same number of levels from a dimension but a level in RHS is either lower or above than LHS level we have to consider filtering the dimension table for batch_id = cur_batch_id.
+    And when RHS level is lower ie we have to do aggregation then we have to also include old ancestors.
+
+    Lets say style to class mapping is changed and we have to aggregate from sku to class (class being the grandparent of sku, then need to have a trigger that whenever there's an update to a level cascade down its effects to its direct children and then recursively its children will cascade down to all the descendants.)
+
+    measA(style,day) = measD(style) + measE(day) + measF(class,day) + measG(sku,day)
+
+    with
+        impacted_keys as (
+            select distinct style,day from measDtbl,dim_day where measDtbl.batch_id = cur_batch_id
+            union
+            select distinct style,day from measEtbl,dim_style where measEtbl.batch_id = cur_batch_id
+            union
+            select distinct style,day from measFtbl,dim_style where measFtbl.class = dim_style.class and (measFtbl.batch_id = cur_batch_id or dim_style.batch_id = cur_batch_id)
+            union
+            select distinct style, day from measGtbl,dim_sku where measGtbl.sku = dim_sku.sku and (measGtbl.batch_id = cur_batch_id or dim_sku.batch_id = cur_batch_id)
+            union
+            select distinct old_style, day from measGtbl,dim_sku where measGtbl.sku = dim_sku.sku and (measGtbl.batch_id = cur_batch_id or dim_sku.batch_id = cur_batch_id)
+        )
+2. For dimmap we need to do full refresh only can't do incremental if dimension data changes.
+    measA[fiscal_mnth] = dimmap('clnd', 'date', '20240923')
+    
+3. For member_id, can get the impacted keys like this (basically the dimension level ids for which there's any change in the row of the dimension level table):
+
+    measA[fiscal_dt]=member_id('clnd',fiscal_mnth)
+
+    with
+        impacted_keys as (
+            select fiscal_dt from dim_fiscal_dt where batch_id = cur_batch_id
+        )
+
+4. For index like dimmap we will have to do full refresh if id is given. If id is not given then like member_id we can do incremental refresh by getting the dimension_level ids for which there is a change in the row in the dimension level table.
+
+5. For is_last too we have to do full refresh like dimmap. For is_first we can do incremental like member_id provided we have a constraint that for ordered dimensions the first index starts from 1.
+
+6. For at_offset:
+    bop_stock[month,loc] = at_offset(eop_stock[month,loc], clnd, -1)
+    with
+        clnd_month as (
+            select * from dim_clnd_month
+        ),
+        loc_loc as (
+            select * from dim_loc_loc
+        ),
+        eop_stock_month_loc as (
+            select * from eop_stock_tbl
+        ),
+        impacted_keys(
+            select eop_stock.loc_id,lead(clnd_month.month_id,1) over (order by dim_month.index)
+            from clnd_month left join eop_stock on clnd_month.month_id = eop_stock.month_id
+            where batch_id = cur_batch_id
+        ),
+        eop_stock_filtered as (
+            select * from eop_stock,dim_month where 
+        )
+    select  from impacted_keys left join
+

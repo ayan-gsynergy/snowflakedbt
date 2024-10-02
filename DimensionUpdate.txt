@@ -1,0 +1,5 @@
+Changes suggested to dimension load after 1st load to enable better incremental load for facts:
+    1. Enable incremental updates for dimensions too - without an incremental load any its difficult to figure out changes in dimensions and thus apply the incremental changes in facts according to the rules.
+    2. Get dimensions data from user always in fully normalized fashion - Can't (or more difficult to) enable incremental updates to dimensions data with denormalized form.
+    3. Not allow any deletes in any dimension, the user can set attributes like inactive or deleted and the presentation layer can filter accordingly to show only the data excluding the inactive or deleted dimension ids. - Doing incremental updates on dimensions means no deletes in dimensions.
+    4. Allow childless parents - a side effect of allowing incremental updates in dimensions.

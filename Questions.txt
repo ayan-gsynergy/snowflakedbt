@@ -1,0 +1,123 @@
+measA(sku,month) = coalesce(dimmap('clnd', 'fscl_date', '17th September 2024'),0) + coalesce(meas1(sku,month),0)
+
+
+meas1:
+
+sku1,September 2024, 1000
+
+
+measA:
+
+sku1,September 2024, 1st September 2027
+sku2,September 2024, 1st September 2024
+all SKUs, all dates will have the same measure value --> 17th September 2024 except for the 1st row
+
+
+measA(style) = measB(sku)
+
+y = 4x3 + 2x2 +89
+x= ?y?
+
+
+----------------------------------------------------------------------------------------
+
+measA[fiscal_dt]=clnd.fiscal_dt
+According to Barani, this is not allowed
+
+key          , measure_value
+17th Sep 2024, 17th Sep 2024
+16th Sep 2024, 16th Sep 2024
+.
+.
+.
+.
+1st Jan 2000, 1st Jan 2000    
+
+
+
+
+I'm saying but this is allowed:
+measA[fiscal_dt]=member_id('clnd')
+
+key          , measure_value
+17th Sep 2024, 17th Sep 2024
+16th Sep 2024, 16th Sep 2024
+.
+.
+.
+.
+1st Jan 2000, 1st Jan 2000    
+
+And again what will happen if we change the dimensions to the incremental approach?
+
+
+What happens if someone just deletes the first entry (or changes the ordering ie index) in the calendar dimension then we will have to recalculate all the measures using the is_first(clnd). How do we solve for such cases in incremental approach?
+
+--------------------------------------------------------------------------------
+Questions:
+
+1.  viewMeas[SKU] = 1
+        I think treat this as a special condition of case 2 of 'Non conforming intersections' and replicate 1 down to all the SKUs --Ignore
+    ```
+        with
+            sku as (select * from dim_sku),
+            base_intersection as (select * from sku)
+        select sku_id, 1 as viewMeas  from base_intersection;
+    ```
+
+    viewMeas[SKU] = factMeas[SKU] + 1
+        factMeas has data only for 30% of SKUs and there is no default set for any of the measures
+        first replicate 1 to SKU and then try adding 1[SKU] with factMeas[SKU] and for 70% it will be calculated as null according to SQL semantics of adding null with non null.
+        Should we filter out the null rows while saving? I think we should.
+    ```
+        with
+            factMeas as (select * from factMeastbl)
+        select sku_id, factMeas + 1 as viewMeas from factMeas;
+    ```
+        
+        But what if there's a default set for factMeas, in those cases we must do a left join with its base intersection and also use a coalesce
+
+
+    ```
+        with
+            sku as (select * from dim_sku),
+            base_intersection as (select * from dim_sku),
+            factMeas as (select base_intersection.sku_id,coalesce(factMeastbl.factMeas,<defaultvalue>) from base_intersection left join factMeastbl on base_intersection.sku = factMeas.sku)
+        select sku_id, factMeas + 1 as viewMeas from factMeas;
+    ```
+
+    viewMeas[SKU] = coalesce(factMeas[SKU],0)+1
+    
+        should we this time join factMeas with SKU table and thus end up calculating 1 as the value for viewMeas for 70% of SKUs. I think yes.
+
+    viewMeas[SKU] = factMeas[SKU] + 1 + 3
+        Should we still try to replicate both 1 and 3 separately or should we just add 1 and 3 first to 4 and then replicate --Ignore
+    ```
+        with
+            factMeas as (select * from factMeastbl)
+        select sku_id, factMeas + 1 + 3 as viewMeas from factMeas;
+    ```
+    viewMeas[mnth] = dimmap('clnd', 'dt', 20240917)
+    ```
+        with
+            mnth as (select * from dim_mnth),
+            base_intersection as (select * from mnth),
+            dimmap as (select mnth_id from dim_dt where dt = 20240917)
+        select base_intersection.mnth_id, dimmap.mnth_id as viewMeas  from base_intersection,dimmap;
+    ```
+    
+    viewMeas[mnth] = member_id('clnd', 'year') + factMeas[mnth]
+                    /*
+                    with
+                        factMeas as (select * from factMeastbl),
+                        mnth as (select * from dim_mnth),
+                        member_id as (select mnth_id, year_id as viewMeas  from mnth)
+                    select  factMeas+ member_id.viewMeas from factMeas full outer join member_id on factMeas.mnth_id = member_id.mnth_id;
+                    */
+    ```
+        with
+            mnth as (select * from dim_mnth),
+            base_intersection as (select * from mnth),
+            factMeas as (select * from factMeastbl)
+        select  base_intersection.mnth_id, base_intersection.year_id+factMeas.factMeas from base_intersection left join factMeas on base_intersection.mnth_id = factMeas.mnth_id;
+    ```

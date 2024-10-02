@@ -1,0 +1,96 @@
+1. For string functions should we define SQL equivalent functions for the user to write in Rules or should we expect the user to understand the logic of Javascript functions and then try to implement Javascript functions in SQL? - I favor SQL functions
+
+2. Should we support 'null'?
+    if(measA = null, 0, 1)
+    case when measA = null then 0 else 1 end 
+    or should it be
+    case when measA is null then 0 else 1 end
+
+    What if someone wants to not evaluate (print null/blank) a measure based on some condition?
+
+    Should we support exists(measA) function?
+    measA is not null
+
+    For formula: if(exists(measA), 5, 15)
+    case when measA is not null then 5 else 15 end
+
+3. Lets say factMeastbl contains only 30% of SKUs.
+    viewMeas[SKU] = factMeas[SKU] + 1
+    I think we should calculate viewMeas also for only 30% of SKUs.
+
+    with
+        factMeas as (select * from factMeastbl)
+        select sku_id, factMeas + 1 as viewMeas from factMeas;
+
+    viewMeas[SKU] = coalesce(factMeas[SKU],0)+1
+    I think need to evaluate viewMeas for all SKUs by left join from base intersection.
+
+    with
+        factMeas as (select * factMeastbl),
+        sku as (select * from dim_sku),
+        base_intersection as (select * from sku)
+    select base_intersection.sku_id, coalesce(factMeas.factMeas,0) + 1 as viewMeas from base_intersection left join factMeas on base_intersection.sku_id = factMeas.sku_id;
+
+    viewMeas[SKU] = if(factMeas<10,5,15)
+
+    Should we try to evaluate viewMeas for the other 70%? I think No. If we try to evaluate for other 70% then viewMeas will turn out to be 15 for this 70%.
+
+    If for other 70%, the rows exist but factMeas value is null then to correctly handle this scenario we should do this:
+    so for anything other than a literal or just a single exists(something), use this:
+    case when (factMeas<10) is null then null when factMeas<10 then 5 else 15
+
+4. Lets say now meas1 and meas2 come from different tables and hold only 20% and 30% of SKUs resp.
+    measA[SKU] = meas1[SKU] + meas2[SKU]
+    with
+        meas1 as (select * from meas1tbl),
+        meas2 as (select * from meas2tbl),
+    select meas1.sku_id, meas1.meas1 + meas2.meas2 as measA from meas1,meas2 where meas1.sku_id = meas2.sku_id;
+    Think should do above unless there is a coalesce on either of the measures.
+
+5. 
+    measA[SKU] = coalesce(meas1[SKU],0)+meas2[SKU] + meas3[SKU]
+
+    I think we should do inner join meas2 and meas3 and then do a left join from that to meas1 table. --In cases of coalesce(meas1,0) or coalesce(meas1,0)+1 left join from base intersection.
+    Or to make things easy we will do full outer joins between all tables whenever there is a coalesce on any of the measures. --coalesce(meas1,0) or coalesce(meas1,0)+1 cases handle separately.
+    Or should we do a left join from base_intersection always whenever there is a coalesce --prefer this. helps in cases formula = coalesce(meas1,0) or coalesce(meas1,0)+1
+
+    Or should we do a left join with base intersection always regardless of any condition and then in the outer most CTE/select we filter only those rows which have atleast 1 non null value.
+
+    Need to use base_intersection when we use complicated functions as well as single constant in RHS for sure and if any of the functions use coalesce on a measure otherwise just use inner joins.
+
+6. In Incremental Mode,
+    measA[SKU] = meas1[SKU] + coalesce(meas2[SKU],100)
+    measA --> sku1
+    with
+    {% if is_incremental() %}
+        impacted_keys as (
+            select distinct sku_id from meas1tbl where batch_id = cur_batch_id
+            union
+            select distinct sku_id from meas2tbl where batch_id = cur_batch_id -- will return no result
+        ),
+    {% endif %}
+        meas1filtered as (
+            select * from meas1tbl where 1=1
+            {% if is_incremental() %}
+                and (sku_id) in (select sku_id from impacted_keys)
+            {% endif %}
+        ),
+        meas2filtered as (
+            select * from meas2tbl where 1=1
+            {% if is_incremental() %}
+                and dim_sku.sku_id in (select sku_id from impacted_keys)
+            {% endif %}
+        ) -- will return no rows if no data exist for SKU1 in meas2tbl
+    select impacted_keys.sku_id, meas1filtered.meas1+coalesce(meas2filtered.meas2,100)
+    from impacted_keys left join meas1filtered on impacted_keys.sku_id = meas1filtered.sku_id
+    left join meas2filtered on impacted_keys.sku_id = meas2filtered.sku_id
+
+7. Rule: measA[sku] = meas1[sku] + 15
+
+measA = if(exists(meas1),15,12)
+In this case I need to left join meas1 with measA
+
+8. Rule: measA[sku] = coalesce(meas1[sku],2) + meas2[sku]
+in this case need to do a left join from sku to meas1 and then join with meas2 but if rule is like this:
+measA=coalesce(meas1,meas2)
+then just doing a full outer join between the 2 measures will suffice no need to left join from the base intersection.

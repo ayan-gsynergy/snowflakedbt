@@ -1,0 +1,229 @@
+#No updates in dimensions, only updates in measures
+Note:
+1. In case there's no update on dimensions then the logic for simple and non simple functions remain the same for Incremental load.
+
+##Simple function with different types of aggregations and replications
+Rule1: measA[style,day] = measD[style] + measE[day] + measF[style,day] + measG[sku,day] + measH[class,day]
+
+with
+    prod_style as (
+        select * from dim_prod_style
+    ),
+    clnd_day as (
+        select * from dim_clnd_day
+    ),
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    measD_prod_style as (
+        select * from measD_tbl
+    ),
+    measE_clnd_day as (
+        select * from measE_tbl
+    ),
+    measF_prod_style_clnd_day as (
+        select * from measF_tbl
+    ),
+    measG_prod_sku_clnd_day as (
+        select * from measG_tbl
+    ),
+    measH_prod_class_clnd_day as (
+        select * from measH_tbl
+    ),
+    impacted_keys as (
+        select distinct style_id,day_id from measD_prod_style,clnd_day where measD_prod_style.batch_id = cur_batch_id
+        union
+        select distinct style_id,day_id from measE_clnd_day,prod_style where measE_clnd_day.batch_id = cur_batch_id
+        union
+        select distinct style_id,day_id from measF_prod_style_clnd_day where measF_prod_style_clnd_day.batch_id = cur_batch_id
+        union
+        select distinct style_id,day_id from measG_prod_sku_clnd_day,prod_sku where measG_prod_sku_clnd_day.sku_id = prod_sku.sku_id and measG_prod_sku_clnd_day.batch_id = cur_batch_id
+        union
+        select distinct style_id,day_id from measH_prod_class_clnd_day,prod_style where measH_prod_class_clnd_day.class_id = prod_style.class_id and measH_prod_class_clnd_day.batch_id = cur_batch_id
+    ),
+    measD_prod_style_clnd_day_filtered as (--replication step
+        select 
+            measD_prod_style.style_id,
+            clnd_day.day_id,
+            measD_prod_style.measD
+        from
+            measD_prod_style,
+            clnd_day
+        where (style_id,day_id) in (select style_id,day_id from impacted_keys)
+    ),
+    measE_prod_style_clnd_day_filtered as (--replication step
+        select
+            prod_style.style_id,
+            measE_clnd_day.day_id,
+            measE_clnd_day.measE
+        from
+            measE_clnd_day,
+            prod_style 
+        where (style_id,day_id) in (select style_id,day_id from impacted_keys)
+    ),
+    measF_prod_style_clnd_day_filtered as (
+        select
+            style_id,
+            day_id,
+            measF
+        from
+            measF_prod_style_clnd_day 
+        where (style_id,day_id) in (select style_id,day_id from impacted_keys)
+    ),
+    measG_prod_style_clnd_day_filtered as ( --aggregation step
+        select
+            prod_sku.style_id,
+            measG_prod_sku_clnd_day.day_id,
+            agg(measG_prod_sku_clnd_day.measG) as measG
+        from 
+            measG_prod_sku_clnd_day,
+            prod_sku 
+        where
+            measG_prod_sku_clnd_day.sku_id = prod_sku.sku_id
+            and (style_id,day_id) in (select style_id,day_id from impacted_keys)
+        group by prod_sku.style_id,
+        measG_prod_sku_clnd_day.day_id
+    ),
+    measH_prod_style_clnd_day_filtered as ( --replication step
+        select
+            prod_style.style_id,
+            measH_prod_class_clnd_day.day_id,
+            measH_prod_class_clnd_day.measH
+        from
+            measH_prod_class_clnd_day,
+            prod_style
+        where
+            measH_prod_class_clnd_day.class_id = prod_style.class_id
+            and (style_id,day_id) in (select style_id,day_id from impacted_keys)
+    )
+select
+    impacted_keys.style_id,impacted_keys.day_id,
+    measD + meadE + measF + measG + measH as measA 
+from 
+    impacted_keys 
+        left join measD_prod_style_clnd_day_filtered on impacted_keys.style_id = measD_prod_style_clnd_day_filtered.style_id and impacted_keys.day_id = measD_prod_style_clnd_day_filtered.day_id
+        left join measE_prod_style_clnd_day_filtered on impacted_keys.style_id = measE_prod_style_clnd_day_filtered.style_id and impacted_keys.day_id = measE_prod_style_clnd_day_filtered.day_id
+        left join measF_prod_style_clnd_day_filtered on impacted_keys.style_id = measF_prod_style_clnd_day_filtered.style_id and impacted_keys.day_id = measF_prod_style_clnd_day_filtered.day_id
+        left join measG_prod_style_clnd_day_filtered on impacted_keys.style_id = measG_prod_style_clnd_day_filtered.style_id and impacted_keys.day_id = measG_prod_style_clnd_day_filtered.day_id;
+        left join measH_prod_style_clnd_day_filtered on impacted_keys.style_id = measH_prod_style_clnd_day_filtered.style_id and impacted_keys.day_id = measH_prod_style_clnd_day_filtered.day_id;
+
+
+
+
+##Non Simple function since it uses a coalesce but the logic remains same as that for simple
+Rule2: measA[style,day] = coalesce(measG[sku,day],1) + measH[class,day]
+
+with
+    prod_style as (
+        select * from dim_prod_style
+    ),
+    measG_prod_sku_clnd_day as (
+        select * from measG_tbl
+    ),
+    measH_prod_class_clnd_day as (
+        select * from meas_Htbl
+    ),
+    impacted_keys as (
+        select distinct style_id,day_id from measG_prod_sku_clnd_day,prod_sku where measG_prod_sku_clnd_day.sku_id = prod_sku.sku_id and measG_prod_sku_clnd_day.batch_id = cur_batch_id
+        union
+        select distinct style_id,day_id from measH_prod_class_clnd_day,prod_style where measH_prod_class_clnd_day.class_id = prod_style.class_id and measH_prod_class_clnd_day.batch_id = cur_batch_id
+    ),
+    measG_prod_style_clnd_day_filtered as ( --aggregation step
+        select
+            prod_sku.style_id,
+            measG_prod_sku_clnd_day.day_id,
+            agg(measG_prod_sku_clnd_day.measG) as measG
+        from 
+            measG_prod_sku_clnd_day,
+            prod_sku 
+        where
+            measG_prod_sku_clnd_day.sku_id = prod_sku.sku_id
+            and (style_id,day_id) in (select style_id,day_id from impacted_keys)
+        group by prod_sku.style_id,
+        measG_prod_sku_clnd_day.day_id
+    ),
+    measH_prod_style_clnd_day_filtered as ( --replication step
+        select
+            prod_style.style_id,
+            measH_prod_class_clnd_day.day_id,
+            measH_prod_class_clnd_day.measH
+        from
+            measH_prod_class_clnd_day,
+            prod_style
+        where
+            measH_prod_class_clnd_day.class_id = prod_style.class_id
+            and (style_id,day_id) in (select style_id,day_id from impacted_keys)
+    )
+select
+    impacted_keys.style_id,impacted_keys.day_id,
+    coalesce(measG,1) + measH as measA 
+from 
+    impacted_keys 
+        left join measG_prod_style_clnd_day_filtered on impacted_keys.style_id = measG_prod_style_clnd_day_filtered.style_id and impacted_keys.day_id = measG_prod_style_clnd_day_filtered.day_id
+        left join measH_prod_style_clnd_day_filtered on impacted_keys.style_id = measH_prod_style_clnd_day_filtered.style_id and impacted_keys.day_id = measH_prod_style_clnd_day_filtered.day_id;
+
+
+
+##Another Non Simple Function
+Rule3: measA[style,day] = dimmap('prod', 'sku', 1010101) + measH[class,day]
+with
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    prod_style as (
+        select * from dim_prod_style
+    ),
+    measH_prod_class_clnd_day as (
+        select * from meas_Htbl
+    ),
+    impacted_keys as (
+        select distinct style_id,day_id from measH_prod_class_clnd_day,prod_style where measH_prod_class_clnd_day.class_id = prod_style.class_id and measH_prod_class_clnd_day.batch_id = cur_batch_id
+    ),
+    measH_prod_style_clnd_day_filtered as ( --replication step
+        select
+            prod_style.style_id,
+            measH_prod_class_clnd_day.day_id,
+            measH_prod_class_clnd_day.measH
+        from
+            measH_prod_class_clnd_day,
+            prod_style
+        where
+            measH_prod_class_clnd_day.class_id = prod_style.class_id
+            and (style_id,day_id) in (select style_id,day_id from impacted_keys)
+    ),
+    dimmap_prod_sku_1010101 as (
+        select style_id as dimmap_value from prod_sku where sku_id = 1010101
+    )
+select
+    impacted_keys.style_id,impacted_keys.day_id,
+    dimmap_prod_sku_1010101.dimmap_value+measH as measA 
+from 
+    impacted_keys 
+        left join measG_prod_style_clnd_day_filtered on impacted_keys.style_id = measG_prod_style_clnd_day_filtered.style_id and impacted_keys.day_id = measG_prod_style_clnd_day_filtered.day_id;
+
+Rule4: bop_stock[month,loc] = at_offset(eop_stock[month,loc], clnd, -1) + meas1[month]
+with
+    clnd_month as (
+        select * from dim_clnd_month
+    ),
+    loc_loc as (
+        select * from dim_loc_loc
+    ),
+    eop_stock_month_loc as (
+        select * from eop_stock_tbl
+    )
+    meas1_clnd_month as (
+        select * from meas1_tbl
+    )
+    impacted_keys as (
+        select
+            distinct lead(clnd_month.month_id,1) over(partition by eop_stock_month_loc.loc_id order by clnd_month.month_index) as month_id,
+            loc_id
+        from clnd_month left join eop_stock_month_loc on clnd_month
+        where eop_stock_month_loc.batch_id = cur_batch_id
+        union
+        select distinct month_id,loc_id from meas1_clnd_month, loc_loc where meas1_clnd_month.batch_id = cur_batch_id
+    ),
+    
+
+#Updates on dimensions too

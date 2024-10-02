@@ -1,0 +1,64 @@
+As long as there's no update on dimensions, we can work with Dimension and Ordered Diension functions in Incremental approach.
+
+1. measA[fiscal_dt]=clnd.fiscal_dt
+According to Barani, above is not allowed
+
+key          , measure_value
+17th Sep 2024, 17th Sep 2024
+16th Sep 2024, 16th Sep 2024
+.
+.
+.
+1st Jan 2000, 1st Jan 2000    
+
+
+But this is allowed:
+measA[fiscal_dt]=member_id('clnd')
+
+key          , measure_value
+17th Sep 2024, 17th Sep 2024
+16th Sep 2024, 16th Sep 2024
+.
+.
+.
+1st Jan 2000, 1st Jan 2000
+
+or the formula can even be:
+measA[fiscal_dt]=member_id('clnd',fiscal_mnth)
+
+2. How will we get the impacted keys when the formula uses Dimension or Ordered dimension functions:
+measA[fiscal_mnth] = dimmap('clnd', 'date', '20240923')
+
+If the mapping from day to month changes for 23rd Sep 2024 then all the measures using dimmap using 23rd Sep 2024 as id parameter will need to be calculated. Moreover the impacted keys in above example would be the complete set of base intersection keys.
+What will be the logic for finding impacted keys?
+
+So just like we have some logic for calculating impacted keys for any measure from its upstream measures, need to have a logic for calculating impacted keys based on changes in the related dimensions.
+
+For the above member_id function too
+
+So I guess for dimmap functions if there's a change in the row whose id is given as the 3rd parameter then the complete measure has to be evaluated again.
+
+3. Whats the concept of static measure? For eg 'today'
+    For the example formula:
+    actual_forecast = if (index('clnd') <= index('clnd', dimmap('clnd', 'fscl_date', today)), actual, forecast)
+    How or when will we be updating the value of today measure and when or how will we update the actual_forecast measure?
+
+4. measA[class] = meas1[style]
+   and lets say only 1 style is remapped to another class, we can't recalculate the measA incrementally unless we also store the old parent ie class in the same row or we use time travel query to look at the old class (need to know when the current batch started).
+   The impacted keys in this case would be the old class_id union new class_id.
+
+5. measA[style] = meas1[class]
+As we spread meas1 from class to style, need to get the list of styles that have remappings and then that list of styles becomes the impacted keys.
+But if there's just a description change in a style then that style would not make it to impacted keys only those which have class_id changed
+
+Lets say we get data for a class in meas1 which didn't have data earlier in meas1 table -  so those child Styles of this class will also be in the impacted keys
+
+6. bop_stock[month] = if (is_first(clnd), initial_stock, at_offset(eop_stock[month], clnd, -1))
+
+lets say there is no change in clnd dim then the 2 depending measures are initial_stock and eop_stock and we can calculate which cells' change in the value of each of these measures affect which cell for the bop_stock.
+initial_stock affects all the cells of bop_stock and for eop_stock changing for month_index, we might get change in bop_stock changing for month_index+1.
+That is negative of offset.
+
+bop_stock[month] = if (is_first(clnd), initial_stock, at_offset(eop_stock[day], clnd, -1))
+Here apply the month_index that's impacted for eop_stock and then add the negative of offset to that month_id.
+Then filter eop_stock joined with day table only for this month_index received from previous step

@@ -1,0 +1,830 @@
+Notes:
+1. In a rule look for aggregating opportunities first (case 3 and 1 i) and then look for replicating(case 2 and 1 ii).
+2. When the function to be applied is either a Dimension function, Ordered Dimension function, Timeseries Function, explicit coalesce on any of the measure or if there's just a constant on RHS (all of these cases are to be called non simple functions - just a constant on RHS is also a non simple case) then instead of full outer joins (which we use for simple functions see - ex Rule8) between different CTEs, we use base_intersection with successive left joins (except when RHS is just a constant then we use base_intersection but dont have anything to left join on).
+3. We need only 1 base intersection CTE across all measures in a measure group. If we dont use a cte it doesn't get evaluated so even if there's no need to use base_intersection for a particular measure group we can still keep it.
+4. Whenever we have levels from same dimension in LHS and RHS which are from different branches, we always first aggregate to get a constant value and then replicate that constant for every row of level_id in LHS.
+5. For measures having a default value, we first create a CTE for that measure's base_intersection by doing a cross join of its dimension levels and then left join from this CTE to the measure table. Check for Rule examples - Rule11 and Rule 13
+6. When we create CTEs for measures while picking them up from their tables or when we create CTEs while aggregating or replicating we actually create the CTEs at the level of measure groups and also by the name of the measure groups. See eg Rule22
+7. When we create final CTEs for measures in the measure group table for which we're writing the SQL, we create CTEs at the level of these measures. See eg Rule23,Rule24
+
+
+
+
+Rule1: inv1[style,month] = inventory[sku,month]
+Here, for 1 of the dimensions, the base intersection of the RHS includes a level which is at a lower level than LHS and thus need to aggregate (case 1 i).
+Need to join with (aggregating) dimension table at the level which is in the base intersection of RHS and pick this level id along with the id of the level in the base intersection of LHS.
+
+SQL:
+with
+    inventory_prod_sku_clnd_month as (
+        select *
+        from inventory_tbl
+    ),
+    prod_sku as (
+        select *
+        from dim_prod_sku
+    ),
+    inventory_style_month as (--aggregating step
+        select prod_sku.style_id,inventory_prod_sku_clnd_month.month_id, agg(inventory) as inventory
+        from inventory_prod_sku_clnd_month,prod_sku
+        where inventory_prod_sku_clnd_month.sku_id = prod_sku.sku_id
+        group by prod_sku.style_id,inventory_prod_sku_clnd_month.month_id;
+    )
+    inv1_prod_style_clnd_month as (
+        select style_id,month_id,inventory as inv1 from inventory_style_month
+    )
+select * from inv1_prod_style_clnd_month where inv1 is not null;
+
+
+
+Rule2: inv1[month] = inventory[style,month,loc]
+In this rule, there are more dimensions on RHS than LHS and thus aggregation is required (case 3) to get rid of extra dimensions of RHS. Similar to above rule (case 1 i), in the sense that we need to aggregate.
+We dont need to join with any (aggregating) dimension table because we aggregate along a dimension globally ie beyond any level.
+
+SQL:
+with
+    inventory_prod_style_clnd_month_loc_loc as (
+        select *
+        from inventory_tbl
+    ),
+    inventory_month as (--aggregating step
+        select month_id,agg(inventory) as inv1 from inventory_prod_style_clnd_month_loc_loc
+        group by month_id
+    ),
+    inv1_clnd_month as(
+        select month_id,inv1 from inventory_month
+    )
+select * from inv1_clnd_month where inv1 is not null;
+
+
+
+
+Rule3: inv1 [sku,month] = inventory[style,month]
+RHS measure's base intersection includes a dimension with a level higher than that of LHS. Need to replicate (case 1 ii).
+Whenever there's a replication we need to join with a (replicating) dimension table at the level of LHS's base intersection (also the level to which the RHS measure is to be replicated).
+
+SQL:
+with
+    inventory_prod_style_clnd_month as (
+        select *
+        from inventory_tbl
+    ),
+    prod_sku as (
+        select sku_id, style_id from dim_prod_sku
+    ),
+    inventory_prod_sku_clnd_month as (--replication step
+        select prod_sku.sku_id,inventory_prod_style_clnd_month.month_id, inventory_prod_style_clnd_month.inventory
+        from prod_sku,inventory_prod_style_clnd_month
+        where prod_sku.style_id = inventory_prod_style_clnd_month.style_id;
+    ),
+    inv1_prod_sku_clnd_month as(
+        select sku_id,month_id,inventory as inv1 from inventory_prod_sku_clnd_month
+    )
+select * from inv1_prod_sku_clnd_month where inv1 is not null;
+
+
+
+
+Rule4: inv1[sku,month] = inventory[month]
+Similar as above in the sense that we need to replicate the RHS measure as LHS has more dimensions than RHS (case 2). Need to join with a (replicating) dimension table, pick the table at the level which is in LHS's base intersection.
+
+SQL:
+with
+    inventory_clnd_month as (
+        select *
+        from inventory_tbl
+    ),
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    inventory_prod_sku_clnd_month as (--replication step
+        select prod_sku.sku_id,inventory_clnd_month.month_id,inventory_clnd_month.inventory
+        from prod_sku,inventory_clnd_month
+    ),
+    inv1_prod_sku_clnd_month as(
+        select sku_id,month_id,inventory as inv1 from inventory_prod_sku_clnd_month
+    )
+select * from inv1_prod_sku_clnd_month where inv1 is not null;
+
+
+
+
+Rule:5 inv1[sku] = inventory[fscldt]
+This case is a combination of case 2 and case 3. RHS includes in its base intersection a dimension which is not present in LHS and thus we need to aggregate. Also since LHS has a dimension not present in RHS and thus we need to replicate. So we're going to do aggregation and then replication.
+Like the example in case 3 we dont need an aggregating dimension table but like case 2 example need a replicating dimension table. 
+
+SQL
+with
+    inventory_clnd_fscldt as (
+        select *
+        from inventory_tbl
+    ),
+    inventory as (--aggregation step
+        select agg(inventory) as inventory
+        from inventory_clnd_fscldt 
+    ),
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    inventory_prod_sku as (--replication step
+        select prod_sku.sku_id,inventory.inventory
+        from inventory,prod_sku
+    ),
+    inv1_prod_sku as(    
+        select sku_id,inventory as inv1 from inventory_prod_sku
+    )
+select * from inv1_prod_sku where inv1 is not null;
+
+
+
+
+Rule6: inv1[size] = inventory[color]
+This case is like previous one except the levels are from within same dimension. SKU is the child to both so we can say size and color have a conjugal relationship. 
+RHS includes a level not present in the base intersection of LHS (RHS's level is neither a descendant or ancestor of any level from LHS) and thus we need to aggregate.
+LHS also includes a dimension not present in RHS (LHS's level is neither a descendant or ancestor of any level from RHS), thus we need to replicate too.
+
+The concept in this example works even if there's no direct common child of 2 levels.
+Refer to Note 4.
+
+We need to join with a replicating dimension table, dont need an aggregating dimension table like case 3.
+SQL:
+with
+    inventory_prod_color as (
+        select * from inventory_tbl
+    ),
+    inventory as (--aggregation step
+        select agg(inventory) as inventory from inventory_prod_color
+    ),
+    prod_size as (
+        select * from dim_prod_size
+    ),
+    inventory_prod_size as (
+        select prod_size.size_id, inventory.inventory
+        from inventory,prod_size
+    ),
+    inv1_prod_size as (
+            select size_id,inventory as inv1 from inventory_prod_size
+    )
+select * from inv1_prod_size where inv1 is not null;
+
+
+
+
+Rule7: inv1[style,month] = inventory[sku]
+This is a combination of case 1 i and case 2. Aggregate from sku to style and then replicate down to every month. Need an aggregating dimension as well as a replicating dimension table.
+
+SQL:
+with
+    inventory_prod_sku as (
+        select *
+        from inventory_tbl
+    ),
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    inventory_prod_style as (
+        select prod_sku.style_id,agg(inventory_prod_sku.inventory) inventory
+        from inventory_prod_sku,prod_sku
+        where inventory_prod_sku.sku_id=prod_sku.sku_id
+        group by prod_sku.style_id
+    ),
+    clnd_month as (
+        select month_id from dim_clnd_month
+    ),
+    inventory_prod_style_clnd_month as (
+        select inventory_prod_style.style_id,clnd_month.month_id,inventory_prod_style.inventory
+        from inventory_prod_style,clnd_month
+    ),
+    inv1_prod_style_clnd_month as(
+        select style_id,month_id, inventory as inv1 from inventory_prod_style_clnd_month
+    )
+select * from inv1_prod_style_clnd_month where inv1 is not null;
+
+
+
+
+Rule8: inv1 [sku] = inventory[style,loc] + meas1[sku]
+This case is a combination of case 1 ii and case 3. Need to aggregate first as RHS(inventory) has an extra dimension and then replicate because for the other dimension, RHS's (inventory's) level is an ancestor of LHS's level. 
+
+Refer to Note 1.
+
+Will need a replicating dimension table to replicate from style to sku.
+SQL:
+with
+    inventory_prod_style_loc_loc as (
+        select * from inventory_tbl
+    ),
+    inventory_prod_style as ( --aggregation step
+        select style_id, agg(inventory) inventory
+        from inventory_prod_style_loc_loc
+        group by style_id
+    ),
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    inventory_prod_sku as ( --replication step
+        select prod_sku.sku_id,inventory_prod_style.inventory as inventory
+        from inventory_prod_style,prod_sku
+        where inventory_prod_style.style_id=prod_sku.style_id
+    ),
+    meas1_prod_sku as (
+        select * from meas1_tbl
+    ),
+    inv1_prod_sku as(    
+        select coalesce(inventory_prod_sku.sku_id,meas1_prod_sku.sku_id) as sku_id, inventory_prod_sku.inventory+meas1_prod_sku.meas1 as inv1
+        from inventory_prod_sku full outer join meas1_prod_sku on inventory_prod_sku.sku_id = meas1_prod_sku.sku_id
+    )
+select * from inv1_prod_sku where inv1 is not null;
+
+Because we are just summing 2 measures without using coalesce on any of the measures, we could achieve better performance on this if we use inner join (because null + anything is anyway null) between 2 measures instead of full outer join but lets just keep full outer join for now.
+Reason is if we use full outer join then we can also handle if there're other types of functions like if etc.
+
+
+
+
+Rule9: inv1[sku] = inventory[style,loc] + meas1[sku] + is_first('prod')
+
+Refer to Note 2.
+
+(Assume sku is an ordered dimension for this example)
+
+SQL:
+with
+    inventory_prod_style_loc_loc as (
+        select * from inventory_tbl
+    ),
+    inventory_prod_style as ( --aggregation step
+        select style_id, agg(inventory) inventory
+        from inventory_prod_style_loc_loc
+        group by style_id
+    ),
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    base_intersection as (
+        select * from prod_sku
+    ),
+    inventory_prod_sku as ( --replication step
+        select prod_sku.sku_id,inventory_prod_style.inventory as inventory
+        from inventory_prod_style,prod_sku
+        where inventory_prod_style.style_id=prod_sku.style_id
+    ),
+    meas1_prod_sku as (
+        select * from meas1_tbl
+    ),
+    is_first_prod as (
+        select min(sku_index) as is_first_value from prod_sku
+    ),
+    inv1_prod_sku as(
+        select base_intersection.sku_id,base_intersection.sku_index = is_first_prod.is_first_value + meas1_prod_sku.meas1 + inventory_prod_sku.inventory as inv1
+        from base_intersection left join inventory_prod_sku on base_intersection.sku_id = inventory_prod_sku.sku_id
+        left join meas1_prod_sku on base_intersection.sku_id = meas1_prod_sku.sku_id
+        left join is_first_prod
+    )
+select * from inv1_prod_sku where inv1 is not null;
+
+
+
+
+Rule10: inv1[sku] = const
+
+Refer to Note 2.
+
+SQL:
+with
+    prod_sku as (select * from dim_prod_sku),
+    base_intersection as (select * from prod_sku)
+    inv1_prod_sku as(
+        select base_intersection.sku_id, const as inv1  from base_intersection
+    )
+select * from inv1_prod_sku where inv1 is not null;
+
+
+
+
+Rule11: inv1[sku,loc] = inventory[style,loc]
+Here assume inventory has a default value
+with
+    prod_sku as (select * from dim_prod_sku),
+    loc_loc as (select * from dim_loc_loc),
+    prod_style as (select * from dim_prod_style),
+    inventory_prod_style_loc_loc as (
+        select * from inventory_tbl
+    ),
+    base_intersection_prod_style_loc_loc as ( --Note that this CTE doesn't have the name base_intersection which we use for the measure group's base intersection. This CTE is the base intersection of 1 of the RHS measures. Need this kind of CTE only for measures having a default value
+        select * from prod_style,loc_loc
+    ),
+    inventory_defaulted_prod_style_loc_loc as (
+        select
+            base_intersection_prod_style_loc_loc.style_id,
+            base_intersection_prod_style_loc_loc.loc_id,
+            coalesce(inventory,<default_value_for_inventory>) as inventory
+        from
+            base_intersection_prod_style_loc_loc left join inventory_prod_style_loc_loc 
+            on base_intersection_prod_style_loc_loc.style_id = inventory_prod_style_loc_loc.style_id 
+            and base_intersection_prod_style_loc_loc.loc_id = inventory_prod_style_loc_loc.loc_id
+    ),
+    inventory_defaulted_prod_sku_loc_loc as ( --replication step
+        select
+            prod_sku.sku_id,
+            inventory_defaulted_prod_style_loc_loc.loc_id,
+            inventory_defaulted_prod_style_loc_loc.inventory
+        from
+            inventory_defaulted_prod_style_loc_loc,
+            prod_sku
+        where
+            inventory_defaulted_prod_style_loc_loc.style_id=prod_sku.style_id
+    ),
+    inv1_prod_sku_loc_loc as(  
+        select sku_id,loc_id,inventory as inv1 from inventory_defaulted_prod_sku_loc_loc
+    )
+select * from inv1_prod_sku_loc_loc where inv1 is not null;
+
+
+
+
+Rule12: inv1[sku,loc] = coalesce(inventory[style,loc],1)
+Here assume inventory has no default value
+with
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    loc_loc as (
+        select * from dim_loc_loc
+    ),
+    base_intersection as (
+        select * from prod_sku,loc_loc
+    ),
+    inventory_prod_style_loc_loc as (
+        select * from inventory_tbl
+    ),
+    inventory_prod_sku_loc_loc as (--replication step
+        select prod_sku.sku_id,
+        inventory_prod_style_loc_loc.loc_id,
+        inventory_prod_style_loc_loc.inventory
+        from 
+            inventory_prod_style_loc_loc,
+            prod_sku
+        where
+            inventory_prod_style_loc_loc.style_id = prod_sku.style_id
+    ),
+    inv1_prod_sku_loc_loc as(
+        select
+            base_intersection.sku_id,
+            base_intersection.loc_id,
+            coalesce(inventory_prod_sku_loc_loc.inventory,1) as inv1
+        from
+            base_intersection
+            left join inventory_prod_sku_loc_loc
+                on base_intersection.sku_id = inventory_prod_sku_loc_loc.sku_id
+                and base_intersection.sku_id = inventory_prod_sku_loc_loc.loc_id
+    )
+select * from inv1_prod_sku_loc_loc where inv1 is not null;
+
+Compare the differences between default and coalesce on this and the previous rule example.
+
+
+
+
+Rule13: inv1[sku,loc] = inventory[style,loc] + is_first('prod')
+
+Lets say we have a default value for inventory measure.
+Will need a replicating dimension table to replicate from style to sku.
+SQL:
+with
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    loc_loc as (
+        select * from dim_loc_loc
+    ),
+    base_intersection as (
+        select * from prod_sku,loc_loc
+    ),
+    inventory_prod_style_loc_loc as (
+        select * from inventory_tbl
+    ),
+    prod_style as (
+        select * from dim_prod_style
+    ),
+    base_intersection_prod_style_loc_loc as (
+        select * from prod_style,loc_loc
+    ),
+    inventory_defaulted_prod_style_loc_loc as (
+        select
+            base_intersection_prod_style_loc_loc.style_id,
+            base_intersection_prod_style_loc_loc.loc_id,
+            coalesce(inventory,<default_value_for_inventory>) as inventory
+        from
+            base_intersection_prod_style_loc_loc left join inventory_prod_style_loc_loc 
+            on base_intersection_prod_style_loc_loc.style_id = inventory_prod_style_loc_loc.style_id 
+            and base_intersection_prod_style_loc_loc.loc_id = inventory_prod_style_loc_loc.loc_id
+    ),
+    inventory_defaulted_prod_sku_loc_loc as ( --replication step
+        select
+            prod_sku.sku_id,
+            inventory_defaulted_prod_style_loc_loc.loc_id,
+            inventory_defaulted_prod_style_loc_loc.inventory
+        from
+            inventory_defaulted_prod_style_loc_loc,
+            prod_sku
+        where
+            inventory_defaulted_prod_style_loc_loc.style_id=prod_sku.style_id
+    ),
+    is_first_prod as (
+        select min(sku_index) as is_first_value from prod_sku
+    ),
+    inv1_prod_sku_loc_loc as(
+        select
+            base_intersection.sku_id,
+            base_intersection.loc_id,
+            base_intersection.sku_index = is_first_prod.is_first_value + inventory as inv1
+        from
+            base_intersection left join inventory_defaulted_prod_sku_loc_loc
+                on base_intersection.sku_id = inventory_defaulted_prod_sku_loc_loc.sku_id
+                and base_intersection.loc_id = inventory_defaulted_prod_sku_loc_loc.loc_id
+            left join is_first_prod
+    )
+select * from inv1_prod_sku_loc_loc where inv1 is not null;
+
+
+
+
+Rule14:inv1[style,loc] = inventory[style] + dimmap('prod', 'sku', 1010101)
+with
+    inventory_style as (
+        select * from inventory_tbl
+    ),
+    prod_style as (
+        select * from dim_prod_style
+    ),
+    loc_loc as (
+        select * from dim_loc_loc
+    ),
+    base_intersection as (
+        select * from prod_style,loc_loc
+    ),
+    inventory_style_loc as (
+        select inventory_style.style_id,loc_loc.loc_id,inventory_style.inventory -- replication step. Actually this particular replication step could be avoided and instead we could directly join inventory_style with base_intersection, but for now lets keep it to keep code and logic simple and more generic
+        from inventory_style,loc_loc
+    ),
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    dimmap_prod_sku_1010101 as (
+        select style_id as dimmap_value from prod_sku where sku_id = 1010101
+    ),
+    inv1_prod_style_loc_loc as(
+        select
+            base_intersection.style_id,
+            base_intersection.loc_id,
+            inventory_style_loc.inventory+dimmap_prod_sku_1010101.dimmap_value as inv1,
+        from
+            base_intersection
+            left join inventory_style_loc 
+                on base_intersection.style_id = inventory_style_loc.style_id
+                and base_intersection.loc_id = inventory_style_loc.loc_id
+            left join dimmap_prod_sku_1010101
+    )
+select * from inv1_prod_style_loc_loc where inv1 is not null;
+
+
+
+
+Rule15: inv1[style,loc] = inventory[style,loc] + member_id('prod', 'class')
+with
+    prod_style as(
+        select * from dim_prod_style
+    ),
+    loc_loc as (
+        select * from dim_loc_loc
+    ),
+    base_intersection as(
+        select * from prod_style,loc_loc
+    ),
+    inventory_prod_style_loc_loc as(
+        select * from inventory_tbl
+    ),
+    inv1_prod_style_loc_loc as(
+        select
+            base_intersection.style_id,
+            base_intersection.loc_id,
+            inventory_prod_style_loc_loc.inventory+base_intersection.class_id--had there not been any level in the member_id call then instead of class we would add style_id ie the level from the dimension which is in the base_intersection of LHS
+        from
+            base_intersection
+            left join inventory_prod_style_loc_loc
+                on base_intersection.style_id = inventory_prod_style_loc_loc.style_id
+                and base_intersection.loc_id = inventory_prod_style_loc_loc.loc_id
+    )
+select * from inv1_prod_style_loc_loc where inv1 is not null;
+
+
+
+
+Rule16: inv1[style,day] = inventory[style,day] + index('clnd',20241001)
+with
+    prod_style as(
+        select * from dim_prod_style
+    ),
+    clnd_day as(
+        select * from dim_clnd_day
+    ),
+    base_intersection as (
+        select * from prod_style,clnd_day
+    ),
+    inventory_prod_style_clnd_day as (
+        select * from inventory_tbl
+    ),
+    index_clnd_20241001 as ( --When id is given in index function, its implementation is a bit like that of dimmap function
+        select day_index as index_val from clnd_day where day_id = 20241001
+    ),
+    inv1_prod_style_clnd_day as(
+        select
+            base_intersection.style_id,
+            base_intersection.day_id,
+            inventory_prod_style_clnd_day.inventory+index_clnd_20241001.index_val
+        from
+            base_intersection
+            left join inventory_prod_style_clnd_day
+                on base_intersection.style_id = inventory_prod_style_clnd_day.style_id
+                and base_intersection.day_id = inventory_prod_style_clnd_day.day_id
+            left join index_clnd_20241001
+    )
+select * from inv1_prod_style_clnd_day where inv1 is not null;
+
+
+
+
+Rule17: inv1[style,day] = inventory[style,day] + index('clnd')
+with
+    prod_style as(
+        select * from dim_prod_style
+    ),
+    clnd_day as(
+        select * from dim_clnd_day
+    ),
+    base_intersection as (
+        select * from prod_style,clnd_day
+    ),
+    inventory_prod_style_clnd_day as (
+        select * from inventory_tbl
+    ),
+    inv1_prod_style_clnd_day as(
+        select
+            base_intersection.style_id,
+            base_intersection.day_id,
+            inventory_prod_style_clnd_day.inventory+base_intersection.day_index--When id is not given in index function, its implementation is a bit like that of member_id function
+        from
+            base_intersection
+            left join inventory_prod_style_clnd_day
+                on base_intersection.style_id = inventory_prod_style_clnd_day.style_id
+                and base_intersection.day_id = inventory_prod_style_clnd_day.day_id
+    )
+select * from inv1_prod_style_clnd_day where inv1 is not null;
+
+
+
+
+Rule18: bop_stock[month,loc] = at_offset(eop_stock[month,loc], clnd, -1)
+SQL:
+with
+    clnd_month as (
+        select * from dim_clnd_month
+    ),
+    loc_loc as (
+        select * from dim_loc_loc
+    ),
+    base_intersection as (
+        select * from clnd_month,loc_loc
+    ),
+    eop_stock_clnd_month_loc_loc as (
+        select * from eop_stock_tbl
+    ),
+    bop_stock_clnd_month_loc_loc as(
+        select
+            base_intersection.month_id,
+            base_intersection.loc_id,
+            lag(eop_stock.eop_stock,1) over (partition by base_intersection.loc_id order by base_intersection.month_index) as bop_stock
+        from
+            base_intersection -- Note here instead of doing a left join with base intersection which includes all locations we could also have just created a CTE which only has those locations which are present in the eop_stock table but to keep code simple and more general we have used all the location ids.
+            left join eop_stock_clnd_month_loc_loc
+                on base_intersection.month_id = eop_stock_clnd_month_loc_loc.month_id
+                and base_intersection.loc_id = eop_stock_clnd_month_loc_loc.loc_id
+    )
+select * from bop_stock_clnd_month_loc_loc where bop_stock is not null;
+
+
+
+
+Rule19: inv1[style,day] = inventory[style,day] + window_sum(meas1[style,day],'clnd',-1,1)
+with
+    prod_style as(
+        select * from dim_prod_style
+    ),
+    clnd_day as(
+        select * from dim_clnd_day
+    ),
+    base_intersection as (
+        select * from prod_style,clnd_day
+    ),
+    inventory_prod_style_clnd_day as (
+        select * from inventory_tbl
+    ),
+    meas1_prod_style_clnd_day as (
+        select * from meas1_tbl
+    ),
+    inv1_prod_style_clnd_day as (
+        select
+            base_intersection.style_id,
+            base_intersection.day_id,
+            inventory_prod_style_clnd_day.inventory+sum(meas1_prod_style_clnd_day.meas1) over(partition by base_intersection.style_id ordered by base_intersection.day_index rows between 1 preceding and 1 following) as inv1
+        from
+            base_intersection
+            left join inventory_prod_style_clnd_day
+                on base_intersection.style_id = inventory_prod_style_clnd_day.style_id
+                and base_intersection.day_id = inventory_prod_style_clnd_day.day_id
+            left join meas1_prod_style_clnd_day
+                on base_intersection.style_id = meas1_prod_style_clnd_day.style_id
+                and base_intersection.day_id = meas1_prod_style_clnd_day.day_id
+    )
+select * from inv1_prod_style_clnd_day where inv1 is not null;
+
+
+
+
+Rule20: inv1[style,day] = inventory[style,day] + window_sum(meas1[style,month]+meas2[sku,day],'clnd',-1,1)
+with
+    prod_style as(
+        select * from dim_prod_style
+    ),
+    clnd_day as(
+        select * from dim_clnd_day
+    ),
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    base_intersection as (
+        select * from prod_style,clnd_day
+    ),
+    inventory_prod_style_clnd_day as (
+        select * from inventory_tbl
+    ),
+    meas1_prod_style_clnd_month as (
+        select * from meas1_tbl
+    ),
+    meas2_prod_sku_clnd_day as(
+        select * from meas2_tbl
+    ),
+    meas1_prod_style_clnd_day as (
+        select
+            meas1_prod_style_clnd_month.style_id,
+            clnd_day.day_id,
+            meas1_prod_style_clnd_month.meas1
+        from
+            meas1_prod_style_clnd_month,
+            clnd_day
+        where
+            meas1_prod_style_clnd_month.month_id = clnd_day.month_id
+    ),
+    meas2_prod_style_clnd_day as (
+        select
+            prod_sku.style_id,
+            meas2_prod_sku_clnd_day.day_id,
+            agg(meas2_prod_sku_clnd_day.meas2) as meas2
+        from
+            meas2_prod_sku_clnd_day,
+            prod_sku
+        where
+            meas2_prod_sku_clnd_day.sku_id = prod_sku.sku_id
+        group by
+            prod_sku.style_id,
+            meas2_prod_sku_clnd_day.day_id
+    ),
+    inv1_prod_style_clnd_day as(
+        select
+            base_intersection.style_id,
+            base_intersection.day_id,
+            inventory_prod_style_clnd_day.inventory+sum(meas1_prod_style_clnd_day.meas1+meas2_prod_style_clnd_day.meas2) over(partition by base_intersection.style_id ordered by base_intersection.day_index rows between 1 preceding and 1 following) as inv1
+        from
+            base_intersection
+            left join inventory_prod_style_clnd_day
+                on base_intersection.style_id = inventory_prod_style_clnd_day.style_id
+                and base_intersection.day_id = inventory_prod_style_clnd_day.day_id
+            left join meas1_prod_style_clnd_day
+                on base_intersection.style_id = meas1_prod_style_clnd_day.style_id
+                and base_intersection.day_id = meas1_prod_style_clnd_day.day_id
+            left join meas2_prod_style_clnd_day
+                on base_intersection.style_id = meas2_prod_style_clnd_day.style_id
+                and base_intersection.day_id = meas2_prod_style_clnd_day.day_id
+    )
+select * from inv1_prod_style_clnd_day where inv1 is not null;
+
+
+
+
+Rule21: inv1[style,day] = inventory[style,day] + cumulative_sum(meas1,'clnd')
+with
+    prod_style as(
+        select * from dim_prod_style
+    ),
+    clnd_day as(
+        select * from dim_clnd_day
+    ),
+    base_intersection as (
+        select * from prod_style,clnd_day
+    ),
+    inventory_prod_style_clnd_day as (
+        select * from inventory_tbl
+    ),
+    meas1_prod_style_clnd_day as (
+        select * from meas1_tbl
+    ),
+    inv1_prod_style_clnd_day as(
+        select
+            base_intersection.style_id,
+            base_intersection.day_id,
+            inventory_prod_style_clnd_day.inventory+sum(meas1_prod_style_clnd_day.meas1) over(partition by base_intersection.style_id ordered by base_intersection.day_index rows between unbounded preceding and unbounded following) as inv1
+        from
+            base_intersection
+            left join inventory_prod_style_clnd_day
+                on base_intersection.style_id = inventory_prod_style_clnd_day.style_id
+                and base_intersection.day_id = inventory_prod_style_clnd_day.day_id
+            left join meas1_prod_style_clnd_day
+                on base_intersection.style_id = meas1_prod_style_clnd_day.style_id
+                and base_intersection.day_id = meas1_prod_style_clnd_day.day_id
+    )
+select * from inv1_prod_style_clnd_day where inv1 is not null;
+
+
+
+
+Rule22: inv1[style,day] = measA[style] + measB[style]
+Assume measA and measB are stored in a measure_group named facts 
+Also assume measA has a default value
+
+with
+    clnd_day as (
+        select * from dim_clnd_day
+    ),
+    prod_style as (
+        select * from dim_prod_style
+    ),
+    base_intersection_prod_style as (
+        select * from prod_style
+    ),
+    facts_prod_style as (
+        select * from facts_tbl
+    ),
+    facts_defaulted_prod_style as (
+        select
+            base_intersection_prod_style.style_id,
+            coalesce(measA,<default_value_for_measA>) as measA,
+            measB
+        from
+            base_intersection_prod_style
+            left join facts_prod_style
+                on base_intersection_prod_style.style_id = facts_prod_style.style_id
+    ),
+    inv1_prod_style_clnd_day as(
+        select measA + measB as inv1 from facts_defaulted_prod_style
+    )
+select * from inv1_prod_style_clnd_day where inv1 is not null;
+
+
+
+
+Rule23: inv1 [sku] = inventory[style,loc] + meas1[sku]
+Rule24: inv2 [sku] = meas2[sku] + inv1[sku]
+Assume meas1 and meas2 are in the measure group called 'facts'
+And assume inv1 and inv2 belong to the same measure group
+
+
+with
+    inventory_prod_style_loc_loc as (
+        select * from inventory_tbl
+    ),
+    inventory_prod_style as (
+        select style_id, agg(inventory) inventory
+        from inventory_prod_style_loc_loc
+        group by style_id
+    ),
+    prod_sku as (
+        select * from dim_prod_sku
+    ),
+    inventory_prod_sku as (
+        select prod_sku.sku_id,inventory_prod_style.inventory as inventory
+        from inventory_prod_style,prod_sku
+        where inventory_prod_style.style_id=prod_sku.style_id
+    ),
+    facts_prod_sku as (
+        select * from facts_tbl
+    )
+    inv1_prod_sku as ( -- measure level CTE
+        select coalesce(inventory_prod_sku.sku_id,facts_prod_sku.sku_id) as sku_id, inventory_prod_sku.inventory+facts_prod_sku.meas1 as inv1
+        from inventory_prod_sku full outer join facts_prod_sku on inventory_prod_sku.sku_id = facts_prod_sku.sku_id
+    ),
+    inv2_prod_sku as( -- although the CTE has only inv2 in its name, this CTE actually also includes inv1. Measure level CTEs include not the current measure but also all the previous measures from that measure group.
+        select coalesce(inv1_prod_sku.sku_id,facts_prod_sku.sku_id) as sku_id, inv1_prod_sku.inv1,inv1_prod_sku.inv1+facts_prod_sku.meas2 as inv2
+        from inv1_prod_sku full outer join facts_prod_sku on inv1_prod_sku.sku_id = facts_prod_sku.sku_id
+    )
+select * from inv2_prod_sku where inv1 is not null or inv2 is not null; -- In the last select we select from last CTE and filtering for those rows where atleast 1 meas1 is not null
